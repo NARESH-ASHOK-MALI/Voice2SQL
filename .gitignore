@@ -1,0 +1,16 @@
+node_modules/
+.DS_Store
+dist/
+build/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.vscode/
+.idea/
+*.sqlite
+*.db
+frontend/.env
+backend/.env
+nlp_service/.env
+
