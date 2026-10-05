@@ -2,47 +2,124 @@ import os
 import io
 from typing import List, Optional
 
-# Core imports for local models
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
-
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import pdfplumber
 import re
-import spacy
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
+from dotenv import load_dotenv
+
+from llm_client import generate_sql
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
 
 # --- GLOBAL SETUP ---
-DB_URL = os.getenv('DB_URL', 'sqlite:///../voice2sql.sqlite')
-# Point to our new local model folder
-MODEL_NAME = os.getenv('MODEL_NAME', './local-sql-t5-small')
-engine = create_engine(DB_URL)
+load_dotenv(override=True)
+DB_PATH = os.getenv('DB_PATH', 'voice2sql.sqlite')
+engine = create_engine(f'sqlite:///{DB_PATH}')
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Voice2SQL++ NLP Service")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- LOAD LOCAL MODEL AT STARTUP ---
-tokenizer = None
-model = None
-try:
-    print(f"--- Loading local HuggingFace tokenizer and model: {MODEL_NAME} ---")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-    print("--- Tokenizer and model loaded successfully! ---")
-except Exception as e:
-    print(f"\n[ERROR] Failed to load the local model: {e}\n")
+allowed_origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173').split(',')
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["*"], allow_headers=["*"])
 
-# --- (Other functions like QueryBody, ingest, etc. are below) ---
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+schema_store: dict = {}
+
 class QueryBody(BaseModel):
     query: Optional[str] = None
     voice: Optional[str] = None
 
+def register_schema(table: str):
+    insp = inspect(engine)
+    cols = insp.get_columns(table)
+    with engine.connect() as conn:
+        sample_rows = conn.execute(text(f'SELECT * FROM "{table}" LIMIT 3')).fetchall()
+    schema_store[table] = {
+        "columns": [
+            {
+                "name": c["name"],
+                "type": str(c["type"]),
+                "samples": [str(row[i]) for row in sample_rows]
+            }
+            for i, c in enumerate(cols)
+        ]
+    }
+
+def build_schema_text() -> str:
+    parts = []
+    for tbl, info in schema_store.items():
+        col_lines = []
+        for c in info["columns"]:
+            col_lines.append(f'  {c["name"]} ({c["type"]})')
+        parts.append(f'TABLE "{tbl}":\n' + "\n".join(col_lines))
+    return "\n\n".join(parts)
+
+async def validate_and_fix(sql: str, question: str, schema: str, retries: int = 2) -> str:
+    for attempt in range(retries + 1):
+        # Strip and clean
+        sql = sql.strip().rstrip(';')
+        # Remove markdown fences if present
+        sql = re.sub(r'^```sql\s*', '', sql, flags=re.IGNORECASE)
+        sql = re.sub(r'\s*```$', '', sql)
+        sql = sql.strip()
+        
+        if not sql.upper().startswith('SELECT'):
+            if attempt == retries:
+                raise HTTPException(400, 'Only SELECT queries allowed')
+            # Ask LLM to fix
+            fix_prompt = (
+                f"The following is not a valid SELECT query:\n{sql}\n"
+                f"Rewrite it as a single SELECT statement for this schema:\n{schema}\n"
+                f"Question: {question}\nSQL:"
+            )
+            sql = await generate_sql(fix_prompt)
+            continue
+        
+        if ';' in sql:
+            if attempt == retries:
+                raise HTTPException(400, 'Only a single SELECT allowed')
+            fix_prompt = (
+                f"This SQL has multiple statements:\n{sql}\n"
+                "Rewrite as a single SELECT. Return ONLY the SQL.\nSQL:"
+            )
+            sql = await generate_sql(fix_prompt)
+            continue
+        
+        try:
+            ro_url = f'sqlite:///file:{DB_PATH}?mode=ro&uri=true'
+            ro_engine = create_engine(ro_url)
+            with ro_engine.connect() as conn:
+                conn.execute(text(f'EXPLAIN {sql}'))
+            return sql
+        except Exception as e:
+            if attempt == retries:
+                raise HTTPException(422, f'SQL error after retries: {e}')
+            fix_prompt = (
+                f"This SQL failed:\n{sql}\nError: {e}\n"
+                f"Schema:\n{schema}\n"
+                "Fix it. Return ONLY the corrected SELECT.\nSQL:"
+            )
+            sql = await generate_sql(fix_prompt)
+    return sql
+
+def execute_readonly(sql: str) -> list:
+    ro_url = f'sqlite:///file:{DB_PATH}?mode=ro&uri=true'
+    ro_engine = create_engine(ro_url)
+    with ro_engine.connect() as conn:
+        result = conn.execute(text(sql))
+        return [dict(row._mapping) for row in result]
+
 @app.post('/ingest')
-async def ingest(files: List[UploadFile] = File(...)):
-    # This function is fine and needs no changes
+@limiter.limit(os.getenv('RATE_LIMIT_UPLOAD_PER_MIN', '10') + '/minute')
+async def ingest(request: Request, files: List[UploadFile] = File(...)):
     tables = []
     for f in files:
         name = f.filename
@@ -50,8 +127,10 @@ async def ingest(files: List[UploadFile] = File(...)):
         ext = (name.split('.')[-1] or '').lower()
         df = None
         try:
-            if ext == 'csv': df = pd.read_csv(io.BytesIO(content))
-            elif ext == 'json': df = pd.read_json(io.BytesIO(content))
+            if ext == 'csv': 
+                df = pd.read_csv(io.BytesIO(content))
+            elif ext == 'json': 
+                df = pd.read_json(io.BytesIO(content))
             elif ext == 'pdf':
                 with pdfplumber.open(io.BytesIO(content)) as pdf:
                     first_table = None
@@ -62,54 +141,70 @@ async def ingest(files: List[UploadFile] = File(...)):
                     if first_table and len(first_table) > 1:
                         headers = first_table[0]; data = first_table[1:]
                         df = pd.DataFrame(data, columns=headers); df.dropna(how='all', inplace=True)
+                        for col in df.columns: df[col] = pd.to_numeric(df[col], errors='ignore')
                     else: raise ValueError("No data tables could be extracted from the PDF.")
+            elif ext == 'txt':
+                try:
+                    df = pd.read_csv(io.BytesIO(content), sep='\t')
+                    if len(df.columns) == 1:
+                        text_all = content.decode(errors='ignore')
+                        lines = [l.strip() for l in text_all.splitlines() if l.strip()]
+                        df = pd.DataFrame({"line": lines})
+                except Exception:
+                    text_all = content.decode(errors='ignore')
+                    lines = [l.strip() for l in text_all.splitlines() if l.strip()]
+                    df = pd.DataFrame({"line": lines})
             else:
                 text_all = content.decode(errors='ignore')
                 lines = [l.strip() for l in text_all.splitlines() if l.strip()]
                 df = pd.DataFrame({"line": lines})
+            
             if df is None: raise ValueError(f"Could not process file: {name}")
-            table_name = re.sub(r"[^a-zA-Z0-9_]", "_", os.path.splitext(name)[0]).lower()
+            
+            raw_name = os.path.splitext(name)[0]
+            table_name = re.sub(r'\W+', '_', raw_name).lower().strip('_')
+            
             df.to_sql(table_name, engine, if_exists='replace', index=False)
-            tables.append({"name": table_name, "columns": list(df.columns)})
+            register_schema(table_name)
+            
+            top_rows = df.head(5).fillna("").to_dict(orient='records')
+            tables.append({
+                "name": table_name,
+                "columns": list(df.columns),
+                "samples": top_rows
+            })
         except Exception as e:
             tables.append({"name": name, "error": str(e)})
     return {"tables": tables}
 
 @app.post('/nl2sql')
-async def nl2sql(body: QueryBody):
-    query_text = body.query or body.voice or ''
-    if not query_text:
-        return {"sql": "", "rows": []}
+@limiter.limit(os.getenv('RATE_LIMIT_QUERY_PER_MIN', '20') + '/minute')
+async def nl2sql(request: Request, body: QueryBody):
+    question = body.query or body.voice or ''
+    if not question:
+        raise HTTPException(400, 'Empty query')
+    
+    schema = build_schema_text()
+    if not schema:
+        raise HTTPException(400, 'No data uploaded yet. Please upload a file first.')
+    
+    prompt = (
+        "You write SQLite SQL. Use ONLY the tables and columns below.\n"
+        "If the user uses a different word (e.g. teacher), map it to the closest real\n"
+        "column/table. Return one SELECT statement, nothing else.\n\n"
+        f"{schema}\n\n"
+        f"Question: {question}\n"
+        "SQL:"
+    )
+    
+    sql = await generate_sql(prompt)
+    sql = await validate_and_fix(sql, question, schema, retries=2)
+    rows = execute_readonly(sql)
+    return {"sql": sql, "rows": rows}
 
-    # --- DEMO MODE ---
-    # If the question is the one we use for testing, we return the perfect, hardcoded answer.
-    # This guarantees a successful demo.
-    if "computer science" in query_text.lower():
-        print("--- DEMO MODE ACTIVATED for 'Computer Science' query ---")
-        sql_query = "SELECT full_name, major FROM students WHERE major = 'Computer Science'"
-        rows = []
-        try:
-            with engine.begin() as conn:
-                res = conn.execute(text(sql_query))
-                cols = res.keys()
-                for r in res.fetchall():
-                    rows.append({k: v for k, v in zip(cols, r)})
-            return {"sql": sql_query, "rows": rows}
-        except Exception as e:
-            return {"sql": sql_query, "rows": [], "error": f"Demo query failed: {e}"}
-
-    # If the question is different, we can return a message.
-    else:
-        print(f"--- Query received, but not a pre-configured demo query: '{query_text}' ---")
-        return {
-            "sql": "N/A", 
-            "rows": [], 
-            "error": "This query is not supported in the current demo mode. The AI agent is disabled."
-        }
-# Keep your /transcribe function here
-# --- Voice Transcription ---
 @app.post('/transcribe')
-async def transcribe(audio: UploadFile = File(...)):
+@limiter.limit(os.getenv('RATE_LIMIT_VOICE_PER_MIN', '10') + '/minute')
+async def transcribe(request: Request, audio: UploadFile = File(...)):
     use_google = os.getenv('GOOGLE_STT_ENABLED', 'false').lower() == 'true'
     data = await audio.read()
     transcript: Optional[str] = None
@@ -153,5 +248,3 @@ async def transcribe(audio: UploadFile = File(...)):
             return {"error": "No STT available. Enable GOOGLE_STT_ENABLED or install vosk."}
 
     return {"text": transcript or ""}
-
-

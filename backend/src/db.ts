@@ -36,12 +36,14 @@ export async function ensureSchema() {
       t.integer('table_id').references('tables.id')
       t.string('name').notNullable()
       t.string('type').notNullable()
+      t.json('sample_values').nullable()
     })
   }
   const hasResults = await db.schema.hasTable('last_results')
   if (!hasResults) {
     await db.schema.createTable('last_results', t => {
       t.increments('id').primary()
+      t.text('sql').nullable()
       t.json('rows')
       t.timestamp('created_at').defaultTo(db.fn.now())
     })

@@ -1,31 +1,39 @@
-Voice2SQL++: Natural Language Interface for Querying Unstructured and Semi-Structured Data
+# Voice2SQL++
+
+Natural Language Interface for Querying Unstructured and Semi-Structured Data.
 
 ## Overview
-Voice2SQL++ lets users upload files (PDF, CSV, JSON, TXT), automatically infer a database schema, and query the data using natural language (text or voice). The system converts NL → SQL and returns tabular and chart visualizations.
+Voice2SQL++ lets users upload files (PDF, CSV, JSON, TXT), automatically infers a database schema, and allows querying the data using natural language (text or voice). The system converts NL → SQL using an LLM (Gemini, Grok, or OpenAI) and returns tabular and chart visualizations.
 
 ## Monorepo Structure
-- `frontend` – React + Vite + Tailwind UI (upload, query, results with charts)
-- `backend` – Node.js + Express API (file uploads, query orchestration, DB access)
-- `nlp_service` – Python FastAPI (ingestion, schema inference, NL→SQL)
+- `frontend` – React 18 + Vite + Tailwind UI (upload, query, results with charts)
+- `backend` – Node.js + Express API (file uploads, query orchestration, rate limiting, DB access)
+- `nlp_service` – Python FastAPI (ingestion, schema inference, schema-aware NL→SQL generation, transcription)
 
 ## Quick Start
 
-1) Prerequisites
+### 1. Prerequisites
 - Node.js 18+
 - Python 3.10+
-- SQLite (default) or MySQL
 
-2) Install Dependencies
+### 2. Setup Environment Variables
+Copy the `.env.example` file to `.env` in the root directory:
+```bash
+cp .env.example .env
+```
+Open `.env` and fill in your desired LLM provider credentials.
+
+**Provider Options (`LLM_PROVIDER`):**
+- `gemini`: Uses Google's free tier via an OpenAI-compatible endpoint. Get an API key from Google AI Studio (aistudio.google.com). Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g., `gemini-1.5-flash`). Verify current free-tier availability before relying on it heavily.
+- `grok`: Uses xAI's API. Get an API key from console.x.ai. Set `GROK_API_KEY` and `GROK_MODEL` (e.g., `grok-beta`).
+- `openai`: Uses standard OpenAI API. Set `OPENAI_API_KEY` and `OPENAI_MODEL` (e.g., `gpt-4o-mini`).
+
+### 3. Install Dependencies
 ```bash
 npm run install:all
 ```
 
-3) One-time model setup (recommended)
-```bash
-python -m spacy download en_core_web_sm
-```
-
-4) Run All Services (Dev)
+### 4. Run All Services
 ```bash
 npm run dev
 ```
@@ -35,59 +43,25 @@ Services:
 - Backend (Express): http://localhost:3000
 - NLP Service (FastAPI): http://localhost:8001
 
-If backend dev fails to run TypeScript directly, build and start it:
-```bash
-cd backend && npm run build && npm start
-```
-
-## Environment Variables
-
-Create `.env` files in `backend` and `nlp_service` as needed.
-
-Backend `.env` example:
-```
-PORT=3000
-DB_CLIENT=sqlite3
-DB_URL=./voice2sql.sqlite
-PY_SERVICE_URL=http://localhost:8001
-GOOGLE_STT_ENABLED=false
-GOOGLE_APPLICATION_CREDENTIALS=./gcp.json
-```
-
-Python service `.env` example:
-```
-# SQLAlchemy URL (SQLite default):
-DB_URL=sqlite:///./voice2sql.sqlite
-# OpenAI API key for LangChain SQL Agent (recommended):
-OPENAI_API_KEY=your_openai_api_key_here
-```
-
 ## API Endpoints
 
-Backend (prefix http://localhost:3000/api):
-- POST /upload – multipart `files[]`; proxies to NLP `/ingest`
-- POST /query – JSON `{ query?: string, voice?: string }`; proxies to NLP `/nl2sql` and stores last result
-- GET /results – returns last query rows `{ rows: any[] }`
-- POST /voice – multipart `audio` (wav/pcm16 recommended); proxies to NLP `/transcribe`
+**Backend** (`http://localhost:3000/api`):
+- `POST /upload` – Accepts files (CSV, JSON, PDF, TXT up to 10MB). Proxies to NLP `/ingest`.
+- `POST /query` – JSON `{ query: string }`. Proxies to NLP `/nl2sql` and stores result.
+- `GET /results` – Returns last query `{ sql: string, rows: any[] }`.
+- `POST /voice` – Accepts `audio` file. Proxies to NLP `/transcribe`.
 
-NLP Service (prefix http://localhost:8001):
-- POST /ingest – accepts multiple files; creates/updates SQLite tables and simple schema registry
-- POST /nl2sql – naive NL→SQL via transformers pipeline fallback; executes SQL and returns rows
-- POST /transcribe – Google STT if enabled, otherwise Vosk if available
+**NLP Service** (`http://localhost:8001`):
+- `POST /ingest` – Parses files into DataFrames, loads them into SQLite, and registers schema.
+- `POST /nl2sql` – Uses LLM to generate a single read-only `SELECT` statement based on the schema, executes it, and returns results. Validates via `EXPLAIN` and retries if SQL is malformed.
+- `POST /transcribe` – Google STT if enabled, otherwise Vosk fallback (requires PCM16 WAV).
 
-## Deployment
-- Frontend → Vercel (build with `npm run build` inside `frontend`)
-- Backend + NLP Service → Render/Heroku/Fly.io (set env vars; allow backend to reach NLP service)
+## Rate Limiting & Security
+- Both Express and FastAPI endpoints have rate limiting enabled (configured via `.env`).
+- LLM calls use a token-bucket outbound throttle to respect provider API limits and automatically back off on 429 errors.
+- Generated SQL queries are strictly validated (single `SELECT` only, no semicolons) and executed via a read-only SQLite connection to prevent injection attacks.
 
 ## Troubleshooting
-- spaCy model: If you see errors or degraded NLP, run `python -m spacy download en_core_web_sm`.
-- LangChain dependencies: If you get dependency conflicts during `pip install -r nlp_service/requirements.txt`, the versions have been updated to resolve conflicts. Try again.
-- OpenAI API: Set `OPENAI_API_KEY` environment variable for the best Text-to-SQL experience. Without it, the system falls back to simple pattern matching.
-- SQLite locks: Avoid opening `voice2sql.sqlite` in another program while writing.
-- Windows Python: Ensure `python` and `pip` refer to the same interpreter; `py -m pip install -r nlp_service/requirements.txt` can help.
-- Backend TypeScript dev: If `nodemon src/server.ts` fails, build and run JS (`npm run build && npm start`) or configure ts-node preload.
-
-## Notes
-- Voice input uses the Web Speech API in the browser by default. Backend hooks for Google STT or Vosk are scaffolded.
-- The NL→SQL model is a placeholder pipeline; plug in a fine-tuned T5/BART or LangChain for production.
-
+- **Missing API Keys:** If your chosen provider's API key is missing or uses the placeholder text, the NLP service will return an explicit 500 error.
+- **SQLite Locks:** Avoid opening `voice2sql.sqlite` in another program (like a DB viewer) while ingesting data, as it may lock the database.
+- **Backend Build:** If `npm run dev` fails to run TypeScript directly for the backend, you can manually build it: `cd backend && npm run build && npm start`.

@@ -13,7 +13,7 @@ export default function Query() {
       recog.lang = 'en-US'
       recog.interimResults = false
       recog.continuous = false
-      recog.onresult = (e: SpeechRecognitionEvent) => {
+      recog.onresult = (e: any) => {
         const text = e.results[0][0].transcript
         setQuery(text)
         setListening(false)

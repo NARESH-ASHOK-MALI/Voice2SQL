@@ -2,6 +2,8 @@ import { useState, useCallback } from 'react';
 
 type QueryResult = Record<string, any>;
 
+const API_URL = import.meta.env.VITE_API_URL || '';
+
 function App() {
 	const [selectedFile, setSelectedFile] = useState<File | null>(null);
 	const [query, setQuery] = useState<string>('');
@@ -10,6 +12,7 @@ function App() {
 	const [error, setError] = useState<string | null>(null);
 	const [sqlQuery, setSqlQuery] = useState<string>('');
 	const [isListening, setIsListening] = useState<boolean>(false);
+	const [tablesData, setTablesData] = useState<any[]>([]);
 
 	const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
 		if (event.target.files) {
@@ -24,11 +27,12 @@ function App() {
 		}
 		setIsLoading(true);
 		setError(null);
+		setTablesData([]);
 		const formData = new FormData();
 		formData.append('files', selectedFile);
 
 		try {
-			const response = await fetch('http://localhost:3000/api/upload', {
+			const response = await fetch(`${API_URL}/api/upload`, {
 				method: 'POST',
 				body: formData,
 			});
@@ -36,7 +40,9 @@ function App() {
 			if (!response.ok) {
 				throw new Error(data.error || 'Upload failed');
 			}
-			alert(`File uploaded successfully! Inferred tables: ${JSON.stringify(data.tables)}`);
+			if (data.tables) {
+				setTablesData(data.tables);
+			}
 		} catch (err: any) {
 			setError(err.message);
 		} finally {
@@ -87,7 +93,7 @@ function App() {
 		setSqlQuery('');
 
 		try {
-			const response = await fetch('http://localhost:3000/api/query', {
+			const response = await fetch(`${API_URL}/api/query`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -159,6 +165,51 @@ function App() {
 						</div>
 					</div>
 				</div>
+
+				{/* Uploaded Data Preview */}
+				{tablesData.length > 0 && (
+					<div className="w-full max-w-4xl mb-6 md:mb-8">
+						{tablesData.map((table, i) => (
+							<div key={i} className="bg-slate-800/50 backdrop-blur-lg border border-slate-700/50 rounded-2xl p-6 md:p-8 shadow-2xl mb-6 last:mb-0">
+								<h3 className="text-xl font-semibold text-slate-100 mb-4 flex items-center gap-2">
+									<span className="text-slate-400">Preview Table:</span> 
+									<span className="text-blue-400 font-mono">{table.name}</span>
+								</h3>
+								{table.error ? (
+									<p className="text-red-400 bg-red-900/20 p-4 rounded-lg">Error processing: {table.error}</p>
+								) : (
+									<div className="w-full">
+										<p className="text-sm text-slate-400 mb-3 italic">Displaying top {table.samples?.length || 0} rows extracted by the NLP service:</p>
+										<div className="rounded-xl overflow-x-auto border border-slate-600/30 w-full custom-scrollbar">
+											<table className="w-full text-left border-collapse bg-slate-900/30 min-w-max">
+												<thead>
+													<tr className="bg-slate-700/50">
+														{table.columns?.map((col: string) => (
+															<th key={col} className="p-3 border-b border-slate-600/50 text-slate-200 font-semibold text-sm whitespace-nowrap">
+																{col}
+															</th>
+														))}
+													</tr>
+												</thead>
+												<tbody>
+													{table.samples?.map((row: any, idx: number) => (
+														<tr key={idx} className="hover:bg-slate-700/30 transition-colors duration-200">
+															{table.columns?.map((col: string) => (
+																<td key={col} className="p-3 border-b border-slate-600/30 text-slate-300 text-sm whitespace-nowrap">
+																	{String(row[col])}
+																</td>
+															))}
+														</tr>
+													))}
+												</tbody>
+											</table>
+										</div>
+									</div>
+								)}
+							</div>
+						))}
+					</div>
+				)}
 
 				{/* Query Section */}
 				<div className="w-full max-w-4xl mb-6 md:mb-8">
@@ -256,12 +307,12 @@ function App() {
 								</div>
 							</div>
 							
-							<div className="overflow-x-auto">
-								<table className="w-full text-left border-collapse">
+							<div className="rounded-xl overflow-x-auto border border-slate-600/30 w-full">
+								<table className="w-full text-left border-collapse bg-slate-900/30 min-w-max">
 									<thead>
 										<tr className="bg-slate-700/50 backdrop-blur-sm">
 											{Object.keys(results[0]).map((key) => (
-												<th key={key} className="p-4 border-b border-slate-600/50 text-slate-200 font-semibold">
+												<th key={key} className="p-4 border-b border-slate-600/50 text-slate-200 font-semibold whitespace-nowrap">
 													{key}
 												</th>
 											))}
@@ -271,7 +322,7 @@ function App() {
 										{results.map((row, rowIndex) => (
 											<tr key={rowIndex} className="hover:bg-slate-700/30 transition-colors duration-200">
 												{Object.values(row).map((value, colIndex) => (
-													<td key={colIndex} className="p-4 border-b border-slate-600/30 text-slate-300">
+													<td key={colIndex} className="p-4 border-b border-slate-600/30 text-slate-300 whitespace-nowrap">
 														{String(value)}
 													</td>
 												))}

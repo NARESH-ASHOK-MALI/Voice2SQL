@@ -7,8 +7,8 @@
     "dev": "concurrently \"npm:frontend:dev\" \"npm:backend:dev\" \"npm:nlp:dev\"",
     "frontend:dev": "cd frontend && npm run dev",
     "backend:dev": "cd backend && npm run dev",
-    "nlp:dev": "cd nlp_service && python -m uvicorn main:app --reload --port 8001",
-    "install:all": "npm install && cd frontend && npm install && cd ../backend && npm install && cd ../nlp_service && pip install -r requirements.txt",
+    "nlp:dev": "cd nlp_service && .venv\\Scripts\\python -m uvicorn main:app --reload --port 8001",
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && npm install && cd ../nlp_service && python -m venv .venv && .venv\\Scripts\\python -m pip install -r requirements.txt",
     "build": "cd frontend && npm run build",
     "start": "cd backend && npm start"
   },
