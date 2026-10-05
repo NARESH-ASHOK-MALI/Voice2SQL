@@ -1,67 +1,82 @@
-# Voice2SQL++
+# Voice2SQL++ 🎙️💻
 
-Natural Language Interface for Querying Unstructured and Semi-Structured Data.
+Voice2SQL++ is an intelligent Natural Language Interface designed to easily query unstructured and semi-structured data. Users can upload a variety of file formats, automatically infer relational schemas, and query that data using plain English (text or voice) without writing a single line of SQL.
 
-## Overview
-Voice2SQL++ lets users upload files (PDF, CSV, JSON, TXT), automatically infers a database schema, and allows querying the data using natural language (text or voice). The system converts NL → SQL using an LLM (Gemini, Grok, or OpenAI) and returns tabular and chart visualizations.
+## 🌟 Key Features
 
-## Monorepo Structure
-- `frontend` – React 18 + Vite + Tailwind UI (upload, query, results with charts)
-- `backend` – Node.js + Express API (file uploads, query orchestration, rate limiting, DB access)
-- `nlp_service` – Python FastAPI (ingestion, schema inference, schema-aware NL→SQL generation, transcription)
+- **Multi-Format Data Ingestion**: Upload CSV, JSON, TXT, and even **PDF documents** (with automatic table extraction).
+- **Auto-Schema Inference**: Automatically detects columns, types, and structure from your uploaded files and loads them into a fast, local SQLite database.
+- **Natural Language to SQL**: Converts your plain English queries into valid SQL using state-of-the-art LLMs.
+- **Multi-Provider LLM Support**: Seamlessly switch between **Google Gemini**, **NVIDIA NIM (Llama 3, Nemotron)**, and **OpenAI/Grok**.
+- **Interactive Data Preview**: View the auto-inferred schema and the top 5 rows of your uploaded data in a horizontally-scrollable preview panel to verify ingestion.
+- **Data Visualization**: Automatically generates beautiful tabular results and dynamic charts based on your queried data.
+- **Robust Rate Limiting & Security**: Built-in token bucket algorithms prevent API spam, read-only SQL execution prevents SQL injection, and robust LLM retry logic ensures high availability.
 
-## Quick Start
+## 🏗️ Architecture & Monorepo Structure
+
+Voice2SQL++ is built using a modern, decoupled three-tier architecture:
+
+- **`frontend/`** – **React 18 + Vite + Tailwind UI**: The user-facing application featuring file uploads, horizontally scrollable data previews, a query interface, and chart visualizations.
+- **`backend/`** – **Node.js + Express**: The orchestration layer API that handles file passing, request routing, rate limiting, and securely proxying requests to the Python NLP service.
+- **`nlp_service/`** – **Python 3.10+ FastAPI**: The core AI engine. Handles data parsing (Pandas, PDFPlumber), schema generation, transcription (Google STT/Vosk), and LLM context building (FastAPI, AsyncOpenAI, Google GenAI).
+
+## 🚀 Quick Start
 
 ### 1. Prerequisites
+Ensure you have the following installed on your machine:
 - Node.js 18+
 - Python 3.10+
+- `npm` and `pip`
 
 ### 2. Setup Environment Variables
-Copy the `.env.example` file to `.env` in the root directory:
+Initialize your environment variables by copying the example file in the root directory:
 ```bash
 cp .env.example .env
 ```
-Open `.env` and fill in your desired LLM provider credentials.
+*(Also ensure you check `nlp_service/.env` for Python-specific variables if separated)*
 
-**Provider Options (`LLM_PROVIDER`):**
-- `gemini`: Uses Google's free tier via an OpenAI-compatible endpoint. Get an API key from Google AI Studio (aistudio.google.com). Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g., `gemini-1.5-flash`). Verify current free-tier availability before relying on it heavily.
-- `grok`: Uses xAI's API. Get an API key from console.x.ai. Set `GROK_API_KEY` and `GROK_MODEL` (e.g., `grok-beta`).
-- `openai`: Uses standard OpenAI API. Set `OPENAI_API_KEY` and `OPENAI_MODEL` (e.g., `gpt-4o-mini`).
+**Configure your LLM Provider (`LLM_PROVIDER`):**
+- **`nvidia`** (Recommended Free Tier): Uses NVIDIA NIM. Set `NVIDIA_API_KEY` and `NVIDIA_MODEL` (e.g., `meta/llama-3.2-11b-vision-instruct`). Get your API key from [build.nvidia.com](https://build.nvidia.com).
+- **`gemini`**: Uses Google Gemini via Google AI Studio. Set `GEMINI_API_KEY` and `GEMINI_MODEL` (e.g., `gemini-1.5-flash`).
+- **`openai` / `grok`**: Uses standard OpenAI-compatible APIs.
 
 ### 3. Install Dependencies
+Install all NPM dependencies across the monorepo and set up the Python virtual environment for the NLP service:
 ```bash
 npm run install:all
 ```
 
 ### 4. Run All Services
+Start the frontend, Express backend, and FastAPI NLP service concurrently:
 ```bash
 npm run dev
 ```
 
-Services:
-- Frontend: http://localhost:5173
-- Backend (Express): http://localhost:3000
-- NLP Service (FastAPI): http://localhost:8001
+**Services will be available at:**
+- 🖥️ **Frontend UI**: http://localhost:5173
+- ⚙️ **Backend API**: http://localhost:3000
+- 🧠 **NLP Service**: http://localhost:8001
 
-## API Endpoints
+## 📡 API Endpoints
 
-**Backend** (`http://localhost:3000/api`):
-- `POST /upload` – Accepts files (CSV, JSON, PDF, TXT up to 10MB). Proxies to NLP `/ingest`.
-- `POST /query` – JSON `{ query: string }`. Proxies to NLP `/nl2sql` and stores result.
-- `GET /results` – Returns last query `{ sql: string, rows: any[] }`.
-- `POST /voice` – Accepts `audio` file. Proxies to NLP `/transcribe`.
+### Backend (`http://localhost:3000/api`)
+- `POST /upload` – Accepts files (CSV, JSON, PDF, TXT) up to 10MB and proxies to the NLP `/ingest` service.
+- `POST /query` – Expects JSON `{ query: string }`. Proxies to NLP `/nl2sql` to generate and execute the query.
+- `GET /results` – Retrieves the results of the last successful query `{ sql: string, rows: any[] }`.
+- `POST /voice` – Accepts an `audio` file and proxies to the NLP `/transcribe` service.
 
-**NLP Service** (`http://localhost:8001`):
-- `POST /ingest` – Parses files into DataFrames, loads them into SQLite, and registers schema.
-- `POST /nl2sql` – Uses LLM to generate a single read-only `SELECT` statement based on the schema, executes it, and returns results. Validates via `EXPLAIN` and retries if SQL is malformed.
-- `POST /transcribe` – Google STT if enabled, otherwise Vosk fallback (requires PCM16 WAV).
+### NLP Service (`http://localhost:8001`)
+- `POST /ingest` – Parses files into Pandas DataFrames, loads them into SQLite, and registers the schema (returning top 5 rows for UI preview).
+- `POST /nl2sql` – Connects to the configured LLM to generate a strict, read-only `SELECT` statement based solely on the database schema. Validates via `EXPLAIN` and intelligently retries if the generated SQL is malformed.
+- `POST /transcribe` – Converts speech-to-text using Google STT (if enabled) with a local Vosk fallback.
 
-## Rate Limiting & Security
-- Both Express and FastAPI endpoints have rate limiting enabled (configured via `.env`).
-- LLM calls use a token-bucket outbound throttle to respect provider API limits and automatically back off on 429 errors.
-- Generated SQL queries are strictly validated (single `SELECT` only, no semicolons) and executed via a read-only SQLite connection to prevent injection attacks.
+## 🛡️ Rate Limiting & Security
+- **API Throttling**: Both Express and FastAPI endpoints feature configurable rate limiting to prevent abuse.
+- **Token Bucket Retry**: Outbound calls to LLM providers are rate-limited on our side using an asynchronous token bucket to respect strict API limits (handling 429s gracefully).
+- **SQL Injection Prevention**: Generated SQL queries are strictly validated. Only single `SELECT` statements are permitted, and they are executed on a read-only SQLite connection URI (`?mode=ro`).
 
-## Troubleshooting
-- **Missing API Keys:** If your chosen provider's API key is missing or uses the placeholder text, the NLP service will return an explicit 500 error.
-- **SQLite Locks:** Avoid opening `voice2sql.sqlite` in another program (like a DB viewer) while ingesting data, as it may lock the database.
-- **Backend Build:** If `npm run dev` fails to run TypeScript directly for the backend, you can manually build it: `cd backend && npm run build && npm start`.
+## 🛠️ Troubleshooting
+- **Missing API Keys (500 Error):** If your chosen provider's API key is missing or uses the default placeholder text, the NLP service will immediately throw an HTTP 500 error. Check your `.env` files.
+- **NVIDIA Model 404 Error:** Ensure your `NVIDIA_MODEL` variable points to a valid model available to your NVIDIA NIM account (e.g., `meta/llama-3.2-11b-vision-instruct`).
+- **SQLite Database Locks:** Avoid keeping `voice2sql.sqlite` open in external database viewers while uploading/ingesting new files, as this can lock the database file.
+- **Hot-Reloading Env Vars:** The FastAPI service is configured with `load_dotenv(override=True)` so you don't necessarily need to restart the Python server when modifying API keys in the `.env` file during development.
